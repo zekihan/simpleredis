@@ -1,9 +1,6 @@
-// Package simpleredis implements utility routines for interacting with redis.
+// Package simpleredis implements utility routines for interacting.
 // It supports currently the following operations: GET, SET, DELETE,
 // and support timetoleave for keys.
-// Connections are pooled: a command reuses an already authenticated connection
-// when one is idle, and only opens a new one when none is available.
-// With NO external dependencies.
 package simpleredis
 
 import (
@@ -42,7 +39,6 @@ var (
 	errIssue       = errors.New(RedisIssue)
 )
 
-// A pooledConn is a connection to redis on which AUTH and SELECT already ran.
 type pooledConn struct {
 	netConn  net.Conn
 	reader   *bufio.Reader
@@ -54,8 +50,7 @@ func (c *pooledConn) close() {
 	_ = c.netConn.Close()
 }
 
-// A SimpleRedis is used to communicate with redis. Its zero value is unusable,
-// call Init first. It is safe for concurrent use and must not be copied.
+// A SimpleRedis is used to communicate with redis.
 type SimpleRedis struct {
 	host     string
 	pass     string
@@ -77,7 +72,7 @@ func (sr *SimpleRedis) Get(name string) ([]byte, error) {
 	return sr.exec([]byte("GET"), []byte(name))
 }
 
-// Set updates the value for key name in redis with value data for duration seconds.
+// Set updates the value for key name in redis with value data for duration.
 func (sr *SimpleRedis) Set(name string, data []byte, duration int64) error {
 	_, err := sr.exec([]byte("SET"), []byte(name), data, []byte("EX"), []byte(strconv.FormatInt(duration, 10)))
 	return err
@@ -89,7 +84,6 @@ func (sr *SimpleRedis) Del(name string) error {
 	return err
 }
 
-// exec runs one command, on a pooled connection when one is available.
 func (sr *SimpleRedis) exec(args ...[]byte) ([]byte, error) {
 	conn, reused, err := sr.borrow()
 	if err != nil {
@@ -100,9 +94,6 @@ func (sr *SimpleRedis) exec(args ...[]byte) ([]byte, error) {
 	if err == nil || reusable || !reused {
 		return data, err
 	}
-	// A pooled connection died between two commands, which redis closing idle
-	// clients, a restart or a firewall all do, and nothing tells us before we
-	// write on it. Run the command once more, on a connection known to be fresh.
 	conn, err = sr.dial()
 	if err != nil {
 		return nil, err
@@ -112,8 +103,6 @@ func (sr *SimpleRedis) exec(args ...[]byte) ([]byte, error) {
 	return data, err
 }
 
-// borrow takes an idle connection, or opens one. It reports whether the
-// connection comes from the pool, as only those can be stale.
 func (sr *SimpleRedis) borrow() (*pooledConn, bool, error) {
 	var reused *pooledConn
 	var stale []*pooledConn
@@ -141,7 +130,6 @@ func (sr *SimpleRedis) borrow() (*pooledConn, bool, error) {
 	return conn, false, err
 }
 
-// release returns a connection to the pool, or closes it when it cannot be reused.
 func (sr *SimpleRedis) release(conn *pooledConn, reusable bool) {
 	if !reusable {
 		conn.close()
@@ -159,7 +147,6 @@ func (sr *SimpleRedis) release(conn *pooledConn, reusable bool) {
 	sr.mu.Unlock()
 }
 
-// dial opens a connection and runs AUTH and SELECT on it, once for its whole life.
 func (sr *SimpleRedis) dial() (*pooledConn, error) {
 	dialer := net.Dialer{Timeout: dialTimeout}
 	netConn, err := dialer.Dial("tcp", sr.host)
@@ -187,8 +174,6 @@ func (sr *SimpleRedis) dial() (*pooledConn, error) {
 	return conn, nil
 }
 
-// do sends one command and reads its reply. It also reports whether the
-// connection is left in a known state and can go back in the pool.
 func (sr *SimpleRedis) do(conn *pooledConn, args [][]byte) ([]byte, error, bool) { //nolint:revive
 	if err := conn.netConn.SetDeadline(time.Now().Add(ioTimeout)); err != nil {
 		return nil, errUnreachable, false
@@ -203,8 +188,6 @@ func (sr *SimpleRedis) do(conn *pooledConn, args [][]byte) ([]byte, error, bool)
 	return data, err, true
 }
 
-// writeCommand sends a command as a RESP array, which unlike the inline
-// commands keeps keys and values binary safe whatever spaces they hold.
 func writeCommand(writer *bufio.Writer, args [][]byte) error {
 	if _, err := writer.WriteString("*" + strconv.Itoa(len(args)) + "\r\n"); err != nil {
 		return err
@@ -223,9 +206,6 @@ func writeCommand(writer *bufio.Writer, args [][]byte) error {
 	return writer.Flush()
 }
 
-// readReply reads one RESP reply. It reports whether the connection is left
-// clean, which an error reply or a missing key are but a broken or unexpected
-// stream is not.
 func readReply(reader *bufio.Reader) ([]byte, error, bool) { //nolint:revive
 	line, err := readLine(reader)
 	if err != nil {
@@ -248,8 +228,6 @@ func readReply(reader *bufio.Reader) ([]byte, error, bool) { //nolint:revive
 		if length < 0 {
 			return nil, errMiss, true
 		}
-		// The value can hold anything, CRLF included, so read exactly its
-		// announced length rather than up to the next line break.
 		data := make([]byte, length+2)
 		if _, err = io.ReadFull(reader, data); err != nil {
 			return nil, err, false
@@ -260,7 +238,6 @@ func readReply(reader *bufio.Reader) ([]byte, error, bool) { //nolint:revive
 	}
 }
 
-// readLine reads one CRLF terminated protocol line and returns it without the CRLF.
 func readLine(reader *bufio.Reader) ([]byte, error) {
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
@@ -272,8 +249,6 @@ func readLine(reader *bufio.Reader) ([]byte, error) {
 	return line[:len(line)-2], nil
 }
 
-// replyError maps an error reply from redis, keeping its message for anything
-// the caller cannot act on anyway.
 func replyError(message []byte) error {
 	for _, prefix := range [][]byte{[]byte("NOAUTH"), []byte("WRONGPASS"), []byte("NOPERM"), []byte("ERR Client sent AUTH")} {
 		if bytes.HasPrefix(message, prefix) {
@@ -283,7 +258,6 @@ func replyError(message []byte) error {
 	return errors.New(string(message))
 }
 
-// ioError tells a connection that timed out from one that broke.
 func ioError(err error) error {
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() { //nolint:errorlint
 		return errTimeout
