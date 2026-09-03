@@ -26,12 +26,11 @@ const (
 	RedisIssue       = "redis:issue?"
 )
 
-// Defaults for the connection pool, used for every Options field left to zero.
 const (
-	defaultMaxIdleConns = 8
-	defaultIdleTimeout  = 30 * time.Second
-	defaultDialTimeout  = 2 * time.Second
-	defaultIOTimeout    = 1 * time.Second
+	maxIdleConns = 8
+	idleTimeout  = 30 * time.Second
+	dialTimeout  = 2 * time.Second
+	ioTimeout    = 1 * time.Second
 )
 
 //nolint:gochecknoglobals
@@ -43,22 +42,6 @@ var (
 	errIssue       = errors.New(RedisIssue)
 )
 
-// Options tunes the connection pool. Every zero field falls back to its default.
-type Options struct {
-	// MaxIdleConns caps how many connections are kept open between commands.
-	// Commands are never blocked by it: past that many idle connections the
-	// extra ones are closed on release rather than pooled. Default 8.
-	MaxIdleConns int
-	// IdleTimeout discards a pooled connection left unused for that long, before
-	// redis, a load balancer or a firewall drops it on their side. Default 30s.
-	IdleTimeout time.Duration
-	// DialTimeout caps opening a new connection. Default 2s.
-	DialTimeout time.Duration
-	// IOTimeout caps a single command, sending it and reading its reply.
-	// Default 1s.
-	IOTimeout time.Duration
-}
-
 // A pooledConn is a connection to redis on which AUTH and SELECT already ran.
 type pooledConn struct {
 	netConn  net.Conn
@@ -68,53 +51,25 @@ type pooledConn struct {
 }
 
 func (c *pooledConn) close() {
-	// The connection is being discarded: a close error has nothing left to act on.
 	_ = c.netConn.Close()
 }
 
 // A SimpleRedis is used to communicate with redis. Its zero value is unusable,
-// call Init first. It is safe for concurrent use.
+// call Init first. It is safe for concurrent use and must not be copied.
 type SimpleRedis struct {
 	host     string
 	pass     string
 	database string
 
-	maxIdleConns int
-	idleTimeout  time.Duration
-	dialTimeout  time.Duration
-	ioTimeout    time.Duration
-
 	mu   sync.Mutex
 	idle []*pooledConn
 }
 
-// Init sets the redisHost used to connect to redis, with the default pool settings.
+// Init sets the redisHost used to connect to redis.
 func (sr *SimpleRedis) Init(host, pass, database string) {
-	sr.InitWithOptions(host, pass, database, Options{})
-}
-
-// InitWithOptions is Init with the connection pool tuned.
-func (sr *SimpleRedis) InitWithOptions(host, pass, database string, opts Options) {
 	sr.host = host
 	sr.pass = pass
 	sr.database = database
-
-	sr.maxIdleConns = opts.MaxIdleConns
-	if sr.maxIdleConns <= 0 {
-		sr.maxIdleConns = defaultMaxIdleConns
-	}
-	sr.idleTimeout = opts.IdleTimeout
-	if sr.idleTimeout <= 0 {
-		sr.idleTimeout = defaultIdleTimeout
-	}
-	sr.dialTimeout = opts.DialTimeout
-	if sr.dialTimeout <= 0 {
-		sr.dialTimeout = defaultDialTimeout
-	}
-	sr.ioTimeout = opts.IOTimeout
-	if sr.ioTimeout <= 0 {
-		sr.ioTimeout = defaultIOTimeout
-	}
 }
 
 // Get fetches the value for key name in redis.
@@ -134,19 +89,6 @@ func (sr *SimpleRedis) Del(name string) error {
 	return err
 }
 
-// Close closes every pooled connection. The client stays usable afterwards:
-// the next command opens a new connection.
-func (sr *SimpleRedis) Close() {
-	sr.mu.Lock()
-	idle := sr.idle
-	sr.idle = nil
-	sr.mu.Unlock()
-
-	for _, c := range idle {
-		c.close()
-	}
-}
-
 // exec runs one command, on a pooled connection when one is available.
 func (sr *SimpleRedis) exec(args ...[]byte) ([]byte, error) {
 	conn, reused, err := sr.borrow()
@@ -156,9 +98,6 @@ func (sr *SimpleRedis) exec(args ...[]byte) ([]byte, error) {
 	data, err, reusable := sr.do(conn, args)
 	sr.release(conn, reusable)
 	if err == nil || reusable || !reused {
-		// Either it worked, or redis answered and the connection is still clean,
-		// or it broke on a connection just opened: redis itself is the problem and
-		// trying again would only double the load on it.
 		return data, err
 	}
 	// A pooled connection died between two commands, which redis closing idle
@@ -182,11 +121,9 @@ func (sr *SimpleRedis) borrow() (*pooledConn, bool, error) {
 
 	sr.mu.Lock()
 	for len(sr.idle) > 0 {
-		// Most recently used first, so that a burst keeps the same few connections
-		// hot and lets the others age out instead of touching all of them.
 		conn := sr.idle[len(sr.idle)-1]
 		sr.idle = sr.idle[:len(sr.idle)-1]
-		if now.Sub(conn.lastUsed) < sr.idleTimeout {
+		if now.Sub(conn.lastUsed) < idleTimeout {
 			reused = conn
 			break
 		}
@@ -213,7 +150,7 @@ func (sr *SimpleRedis) release(conn *pooledConn, reusable bool) {
 	conn.lastUsed = time.Now()
 
 	sr.mu.Lock()
-	if len(sr.idle) >= sr.maxIdleConns {
+	if len(sr.idle) >= maxIdleConns {
 		sr.mu.Unlock()
 		conn.close()
 		return
@@ -224,7 +161,7 @@ func (sr *SimpleRedis) release(conn *pooledConn, reusable bool) {
 
 // dial opens a connection and runs AUTH and SELECT on it, once for its whole life.
 func (sr *SimpleRedis) dial() (*pooledConn, error) {
-	dialer := net.Dialer{Timeout: sr.dialTimeout}
+	dialer := net.Dialer{Timeout: dialTimeout}
 	netConn, err := dialer.Dial("tcp", sr.host)
 	if err != nil {
 		return nil, errUnreachable
@@ -251,10 +188,9 @@ func (sr *SimpleRedis) dial() (*pooledConn, error) {
 }
 
 // do sends one command and reads its reply. It also reports whether the
-// connection is left in a known state and can go back in the pool: an unread or
-// half read reply would be picked up by the next command on that connection.
+// connection is left in a known state and can go back in the pool.
 func (sr *SimpleRedis) do(conn *pooledConn, args [][]byte) ([]byte, error, bool) { //nolint:revive
-	if err := conn.netConn.SetDeadline(time.Now().Add(sr.ioTimeout)); err != nil {
+	if err := conn.netConn.SetDeadline(time.Now().Add(ioTimeout)); err != nil {
 		return nil, errUnreachable, false
 	}
 	if err := writeCommand(conn.writer, args); err != nil {
@@ -301,7 +237,6 @@ func readReply(reader *bufio.Reader) ([]byte, error, bool) { //nolint:revive
 
 	switch line[0] {
 	case '+', ':':
-		// Status and integer replies: SET, DEL and SELECT answer with one of those.
 		return line[1:], nil, true
 	case '-':
 		return nil, replyError(line[1:]), true
@@ -311,7 +246,6 @@ func readReply(reader *bufio.Reader) ([]byte, error, bool) { //nolint:revive
 			return nil, errIssue, false
 		}
 		if length < 0 {
-			// $-1, the key does not exist.
 			return nil, errMiss, true
 		}
 		// The value can hold anything, CRLF included, so read exactly its
