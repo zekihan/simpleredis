@@ -22,8 +22,7 @@ if err != nil {
 }
 val, err := redis.Get("test") // get key test
 if err != nil {
-  // err could be only redis:unreachable, redis:miss, redis:timeout or redis:noauth,
-  // available in simpleredis.RedisUnreachable and friends, or the error redis replied
+  // err could be only redis:unreachable, redis:miss or redis:timeout available in simpleredis.RedisUnreachable
   ...
 }
 err = redis.Del("test")
