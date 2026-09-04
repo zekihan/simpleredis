@@ -1,15 +1,15 @@
 // Package simpleredis implements utility routines for interacting.
-// It supports currently the following operations: GET, SET, DELETE,
+// It supports currently the following operations: GET, MGET, SET, DELETE,
 // and support timetoleave for keys.
 package simpleredis
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,7 +30,6 @@ const (
 	ioTimeout    = 1 * time.Second
 )
 
-//nolint:gochecknoglobals
 var (
 	errUnreachable = errors.New(RedisUnreachable)
 	errMiss        = errors.New(RedisMiss)
@@ -69,7 +68,34 @@ func (sr *SimpleRedis) Init(host, pass, database string) {
 
 // Get fetches the value for key name in redis.
 func (sr *SimpleRedis) Get(name string) ([]byte, error) {
-	return sr.exec([]byte("GET"), []byte(name))
+	values, err := sr.exec([]byte("GET"), []byte(name))
+	if err != nil {
+		return nil, err
+	}
+	if len(values) != 1 {
+		return nil, errIssue
+	}
+	return values[0], nil
+}
+
+// MGet fetches the values for keys names in redis, nil where a key is missing.
+func (sr *SimpleRedis) MGet(names []string) ([][]byte, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	args := make([][]byte, 0, len(names)+1)
+	args = append(args, []byte("MGET"))
+	for _, name := range names {
+		args = append(args, []byte(name))
+	}
+	values, err := sr.exec(args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(values) != len(names) {
+		return nil, errIssue
+	}
+	return values, nil
 }
 
 // Set updates the value for key name in redis with value data for duration.
@@ -84,23 +110,23 @@ func (sr *SimpleRedis) Del(name string) error {
 	return err
 }
 
-func (sr *SimpleRedis) exec(args ...[]byte) ([]byte, error) {
+func (sr *SimpleRedis) exec(args ...[]byte) ([][]byte, error) {
 	conn, reused, err := sr.borrow()
 	if err != nil {
 		return nil, err
 	}
-	data, err, reusable := sr.do(conn, args)
+	values, reusable, err := sr.do(conn, args)
 	sr.release(conn, reusable)
 	if err == nil || reusable || !reused {
-		return data, err
+		return values, err
 	}
 	conn, err = sr.dial()
 	if err != nil {
 		return nil, err
 	}
-	data, err, reusable = sr.do(conn, args)
+	values, reusable, err = sr.do(conn, args)
 	sr.release(conn, reusable)
-	return data, err
+	return values, err
 }
 
 func (sr *SimpleRedis) borrow() (*pooledConn, bool, error) {
@@ -160,13 +186,13 @@ func (sr *SimpleRedis) dial() (*pooledConn, error) {
 	}
 
 	if sr.pass != "" {
-		if _, err, _ = sr.do(conn, [][]byte{[]byte("AUTH"), []byte(sr.pass)}); err != nil {
+		if _, _, err = sr.do(conn, [][]byte{[]byte("AUTH"), []byte(sr.pass)}); err != nil {
 			conn.close()
 			return nil, err
 		}
 	}
 	if sr.database != "" {
-		if _, err, _ = sr.do(conn, [][]byte{[]byte("SELECT"), []byte(sr.database)}); err != nil {
+		if _, _, err = sr.do(conn, [][]byte{[]byte("SELECT"), []byte(sr.database)}); err != nil {
 			conn.close()
 			return nil, err
 		}
@@ -174,18 +200,18 @@ func (sr *SimpleRedis) dial() (*pooledConn, error) {
 	return conn, nil
 }
 
-func (sr *SimpleRedis) do(conn *pooledConn, args [][]byte) ([]byte, error, bool) { //nolint:revive
+func (sr *SimpleRedis) do(conn *pooledConn, args [][]byte) ([][]byte, bool, error) {
 	if err := conn.netConn.SetDeadline(time.Now().Add(ioTimeout)); err != nil {
-		return nil, errUnreachable, false
+		return nil, false, errUnreachable
 	}
 	if err := writeCommand(conn.writer, args); err != nil {
-		return nil, ioError(err), false
+		return nil, false, ioError(err)
 	}
-	data, err, clean := readReply(conn.reader)
+	values, clean, err := readReply(conn.reader)
 	if err != nil && !clean {
-		return nil, ioError(err), false
+		return nil, false, ioError(err)
 	}
-	return data, err, true
+	return values, true, err
 }
 
 func writeCommand(writer *bufio.Writer, args [][]byte) error {
@@ -206,36 +232,71 @@ func writeCommand(writer *bufio.Writer, args [][]byte) error {
 	return writer.Flush()
 }
 
-func readReply(reader *bufio.Reader) ([]byte, error, bool) { //nolint:revive
+func readReply(reader *bufio.Reader) ([][]byte, bool, error) {
 	line, err := readLine(reader)
 	if err != nil {
-		return nil, err, false
+		return nil, false, err
 	}
 	if len(line) == 0 {
-		return nil, errIssue, false
+		return nil, false, errIssue
 	}
 
 	switch line[0] {
 	case '+', ':':
-		return line[1:], nil, true
+		return [][]byte{line[1:]}, true, nil
 	case '-':
-		return nil, replyError(line[1:]), true
+		return nil, true, replyError(line[1:])
 	case '$':
-		length, convErr := strconv.Atoi(string(line[1:]))
-		if convErr != nil {
-			return nil, errIssue, false
+		data, bulkErr := readBulk(reader, line)
+		if bulkErr == errMiss {
+			return nil, true, errMiss
 		}
-		if length < 0 {
-			return nil, errMiss, true
+		if bulkErr != nil {
+			return nil, false, bulkErr
 		}
-		data := make([]byte, length+2)
-		if _, err = io.ReadFull(reader, data); err != nil {
-			return nil, err, false
+		return [][]byte{data}, true, nil
+	case '*':
+		count, convErr := strconv.Atoi(string(line[1:]))
+		if convErr != nil || count < 0 {
+			return nil, false, errIssue
 		}
-		return data[:length], nil, true
+		values := make([][]byte, count)
+		for i := 0; i < count; i++ {
+			head, headErr := readLine(reader)
+			if headErr != nil {
+				return nil, false, headErr
+			}
+			data, bulkErr := readBulk(reader, head)
+			if bulkErr == errMiss {
+				continue
+			}
+			if bulkErr != nil {
+				return nil, false, bulkErr
+			}
+			values[i] = data
+		}
+		return values, true, nil
 	default:
-		return nil, errIssue, false
+		return nil, false, errIssue
 	}
+}
+
+func readBulk(reader *bufio.Reader, head []byte) ([]byte, error) {
+	if len(head) == 0 || head[0] != '$' {
+		return nil, errIssue
+	}
+	length, err := strconv.Atoi(string(head[1:]))
+	if err != nil {
+		return nil, errIssue
+	}
+	if length < 0 {
+		return nil, errMiss
+	}
+	data := make([]byte, length+2)
+	if _, err = io.ReadFull(reader, data); err != nil {
+		return nil, err
+	}
+	return data[:length], nil
 }
 
 func readLine(reader *bufio.Reader) ([]byte, error) {
@@ -250,16 +311,17 @@ func readLine(reader *bufio.Reader) ([]byte, error) {
 }
 
 func replyError(message []byte) error {
-	for _, prefix := range [][]byte{[]byte("NOAUTH"), []byte("WRONGPASS"), []byte("NOPERM"), []byte("ERR Client sent AUTH")} {
-		if bytes.HasPrefix(message, prefix) {
+	text := string(message)
+	for _, prefix := range []string{"NOAUTH", "WRONGPASS", "NOPERM", "ERR Client sent AUTH"} {
+		if strings.HasPrefix(text, prefix) {
 			return errNoAuth
 		}
 	}
-	return errors.New(string(message))
+	return errors.New(text)
 }
 
 func ioError(err error) error {
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() { //nolint:errorlint
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return errTimeout
 	}
 	return errUnreachable

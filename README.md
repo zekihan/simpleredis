@@ -1,5 +1,5 @@
 # simpleredis
-Minimal go redis with only `get`, `set` and `delete` operation.  
+Minimal go redis with only `get`, `mget`, `set` and `delete` operation.  
 It supports password authentication with redis.
 With **NO** external dependencies.
 
