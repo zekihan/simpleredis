@@ -422,3 +422,13 @@ func TestPasswordRedisDoesNotExpectIsNoAuth(t *testing.T) {
 		t.Fatalf("Get with a password redis does not expect = %v, want %s", err, RedisNoAuth)
 	}
 }
+
+func TestNonRESPReplyIsAnIssue(t *testing.T) {
+	addr := startStaticRedis(t, "hello\r\n")
+	var redis SimpleRedis
+	redis.Init(addr, "", "")
+
+	if _, err := redis.Get("a"); err == nil || err.Error() != RedisIssue {
+		t.Fatalf("Get against a non-RESP reply = %v, want %s", err, RedisIssue)
+	}
+}

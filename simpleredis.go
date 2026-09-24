@@ -328,6 +328,9 @@ func replyError(message []byte) error {
 }
 
 func ioError(err error) error {
+	if err == errIssue {
+		return errIssue
+	}
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return errTimeout
 	}
