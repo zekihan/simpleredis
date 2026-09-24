@@ -49,14 +49,17 @@ func (c *pooledConn) close() {
 	_ = c.netConn.Close()
 }
 
+type pool struct {
+	mu   sync.Mutex
+	idle []*pooledConn
+}
+
 // A SimpleRedis is used to communicate with redis.
 type SimpleRedis struct {
 	host     string
 	pass     string
 	database string
-
-	mu   sync.Mutex
-	idle []*pooledConn
+	pool     *pool
 }
 
 // Init sets the redisHost used to connect to redis.
@@ -64,6 +67,7 @@ func (sr *SimpleRedis) Init(host, pass, database string) {
 	sr.host = host
 	sr.pass = pass
 	sr.database = database
+	sr.pool = &pool{}
 }
 
 // Get fetches the value for key name in redis.
@@ -130,21 +134,24 @@ func (sr *SimpleRedis) exec(args ...[]byte) ([][]byte, error) {
 }
 
 func (sr *SimpleRedis) borrow() (*pooledConn, bool, error) {
+	if sr.pool == nil {
+		return nil, false, errUnreachable
+	}
 	var reused *pooledConn
 	var stale []*pooledConn
 	now := time.Now()
 
-	sr.mu.Lock()
-	for len(sr.idle) > 0 {
-		conn := sr.idle[len(sr.idle)-1]
-		sr.idle = sr.idle[:len(sr.idle)-1]
+	sr.pool.mu.Lock()
+	for len(sr.pool.idle) > 0 {
+		conn := sr.pool.idle[len(sr.pool.idle)-1]
+		sr.pool.idle = sr.pool.idle[:len(sr.pool.idle)-1]
 		if now.Sub(conn.lastUsed) < idleTimeout {
 			reused = conn
 			break
 		}
 		stale = append(stale, conn)
 	}
-	sr.mu.Unlock()
+	sr.pool.mu.Unlock()
 
 	for _, conn := range stale {
 		conn.close()
@@ -163,14 +170,14 @@ func (sr *SimpleRedis) release(conn *pooledConn, reusable bool) {
 	}
 	conn.lastUsed = time.Now()
 
-	sr.mu.Lock()
-	if len(sr.idle) >= maxIdleConns {
-		sr.mu.Unlock()
+	sr.pool.mu.Lock()
+	if len(sr.pool.idle) >= maxIdleConns {
+		sr.pool.mu.Unlock()
 		conn.close()
 		return
 	}
-	sr.idle = append(sr.idle, conn)
-	sr.mu.Unlock()
+	sr.pool.idle = append(sr.pool.idle, conn)
+	sr.pool.mu.Unlock()
 }
 
 func (sr *SimpleRedis) dial() (*pooledConn, error) {

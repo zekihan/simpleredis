@@ -5,8 +5,8 @@ With **NO** external dependencies.
 
 Connections are pooled: a command reuses an already authenticated connection when
 one is idle, so `AUTH` and `SELECT` are paid once per connection instead of once
-per command. A `SimpleRedis` is safe for concurrent use and must not be copied
-once initialized.
+per command. A `SimpleRedis` is safe for concurrent use, and its copies share
+the same pool.
 
 ## Example
 ```go

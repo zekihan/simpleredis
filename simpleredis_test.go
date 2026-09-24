@@ -319,11 +319,11 @@ func TestStaleConnectionIsRetried(t *testing.T) {
 		t.Fatalf("first Get: %v", err)
 	}
 
-	redis.mu.Lock()
-	for _, conn := range redis.idle {
+	redis.pool.mu.Lock()
+	for _, conn := range redis.pool.idle {
 		conn.close()
 	}
-	redis.mu.Unlock()
+	redis.pool.mu.Unlock()
 
 	got, err := redis.Get("hit")
 	if err != nil {
@@ -334,5 +334,36 @@ func TestStaleConnectionIsRetried(t *testing.T) {
 	}
 	if fake.connections() != 2 {
 		t.Fatalf("opened %d connections, want 2", fake.connections())
+	}
+}
+
+func TestCopiesShareOnePool(t *testing.T) {
+	_, addr := startFakeRedis(t, map[string]string{"a": "t"})
+	var redis SimpleRedis
+	redis.Init(addr, "", "")
+	if _, err := redis.Get("a"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	copied := redis
+
+	first, _, err := redis.borrow()
+	if err != nil {
+		t.Fatalf("borrow: %v", err)
+	}
+	second, _, err := copied.borrow()
+	if err != nil {
+		t.Fatalf("borrow from the copy: %v", err)
+	}
+	if first == second {
+		t.Fatal("a client and its copy borrowed the same connection")
+	}
+	redis.release(first, true)
+	copied.release(second, true)
+}
+
+func TestUninitializedClientIsUnreachable(t *testing.T) {
+	var redis SimpleRedis
+	if _, err := redis.Get("a"); err == nil || err.Error() != RedisUnreachable {
+		t.Fatalf("Get without Init = %v, want %s", err, RedisUnreachable)
 	}
 }
