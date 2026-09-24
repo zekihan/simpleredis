@@ -319,7 +319,7 @@ func readLine(reader *bufio.Reader) ([]byte, error) {
 
 func replyError(message []byte) error {
 	text := string(message)
-	for _, prefix := range []string{"NOAUTH", "WRONGPASS", "NOPERM", "ERR Client sent AUTH"} {
+	for _, prefix := range []string{"NOAUTH", "WRONGPASS", "NOPERM", "ERR AUTH", "ERR Client sent AUTH"} {
 		if strings.HasPrefix(text, prefix) {
 			return errNoAuth
 		}

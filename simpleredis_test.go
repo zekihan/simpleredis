@@ -412,3 +412,13 @@ func TestSilentRedisTimesOutWithoutRetry(t *testing.T) {
 		t.Fatalf("opened %d connections, want 1", conns)
 	}
 }
+
+func TestPasswordRedisDoesNotExpectIsNoAuth(t *testing.T) {
+	addr := startStaticRedis(t, "-ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?\r\n")
+	var redis SimpleRedis
+	redis.Init(addr, "secret", "")
+
+	if _, err := redis.Get("a"); err == nil || err.Error() != RedisNoAuth {
+		t.Fatalf("Get with a password redis does not expect = %v, want %s", err, RedisNoAuth)
+	}
+}
