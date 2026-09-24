@@ -121,7 +121,7 @@ func (sr *SimpleRedis) exec(args ...[]byte) ([][]byte, error) {
 	}
 	values, reusable, err := sr.do(conn, args)
 	sr.release(conn, reusable)
-	if err == nil || reusable || !reused {
+	if err == nil || reusable || !reused || err == errTimeout {
 		return values, err
 	}
 	conn, err = sr.dial()

@@ -367,3 +367,48 @@ func TestUninitializedClientIsUnreachable(t *testing.T) {
 		t.Fatalf("Get without Init = %v, want %s", err, RedisUnreachable)
 	}
 }
+
+func TestSilentRedisTimesOutWithoutRetry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	var mu sync.Mutex
+	conns := 0
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns++
+			mu.Unlock()
+			go func(conn net.Conn) {
+				defer conn.Close()
+				reader := bufio.NewReader(conn)
+				if _, err := readCommand(reader); err != nil {
+					return
+				}
+				io.WriteString(conn, "$1\r\nt\r\n")
+				_, _ = io.Copy(io.Discard, reader)
+			}(conn)
+		}
+	}()
+
+	var redis SimpleRedis
+	redis.Init(listener.Addr().String(), "", "")
+	if _, err := redis.Get("a"); err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	if _, err := redis.Get("a"); err == nil || err.Error() != RedisTimeout {
+		t.Fatalf("Get on a silent redis = %v, want %s", err, RedisTimeout)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if conns != 1 {
+		t.Fatalf("opened %d connections, want 1", conns)
+	}
+}
