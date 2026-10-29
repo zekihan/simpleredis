@@ -58,6 +58,19 @@ func writeCommand(w *bufio.Writer, args ...string) error {
 
 func readReply(r *bufio.Reader) (byte, []byte, error) {
 	line, err := r.ReadSlice('\n')
+	if err == bufio.ErrBufferFull {
+		// Error details can include long command arguments. Read across buffer
+		// boundaries while keeping reply lines bounded like bulk payloads.
+		line = append([]byte(nil), line...)
+		for err == bufio.ErrBufferFull {
+			var fragment []byte
+			fragment, err = r.ReadSlice('\n')
+			if len(line)+len(fragment) > maxReplySize {
+				return 0, nil, errors.New("redis:invalid reply")
+			}
+			line = append(line, fragment...)
+		}
+	}
 	if err != nil {
 		return 0, nil, err
 	}
