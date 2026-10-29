@@ -111,6 +111,13 @@ func (p *connectionPool) reap() {
 }
 
 func (p *connectionPool) acquire(ctx context.Context) error {
+	// Admission limits must not mask a cancellation that already happened.
+	if err := ctx.Err(); err != nil {
+		if err == context.DeadlineExceeded {
+			return errors.New(RedisTimeout)
+		}
+		return err
+	}
 	select {
 	case <-p.done:
 		return errors.New(RedisUnreachable)
