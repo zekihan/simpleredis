@@ -3,6 +3,7 @@ package simpleredis
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -22,12 +23,13 @@ const (
 	maxReplySize     = 1024 * 1024
 )
 
-// SimpleRedis opens one bounded connection per operation. Configure before use.
+// SimpleRedis uses bounded operations with optional connection reuse. Configure before use.
 type SimpleRedis struct {
 	host     string
 	username string
 	pass     string
 	database string
+	pool     *connectionPool
 }
 
 // Init preserves password-only authentication for existing callers.
@@ -37,6 +39,8 @@ func (sr *SimpleRedis) Init(host, pass, database string) {
 
 // InitWithUsername selects an ACL identity; an empty username uses legacy AUTH.
 func (sr *SimpleRedis) InitWithUsername(host, username, pass, database string) {
+	sr.Close()
+	sr.pool = nil
 	sr.host, sr.username, sr.pass, sr.database = host, username, pass, database
 }
 
@@ -120,6 +124,9 @@ func exchange(w *bufio.Writer, r *bufio.Reader, expected byte, args ...string) (
 }
 
 func (sr *SimpleRedis) execute(expected byte, args ...string) ([]byte, error) {
+	if sr.pool != nil {
+		return sr.executePooled(context.Background(), expected, args...)
+	}
 	deadline := time.Now().Add(operationTimeout)
 	dialer := net.Dialer{Deadline: deadline}
 	conn, err := dialer.Dial("tcp", sr.host)
@@ -141,21 +148,35 @@ func (sr *SimpleRedis) execute(expected byte, args ...string) ([]byte, error) {
 
 func (sr *SimpleRedis) executeConnection(conn net.Conn, expected byte, args ...string) ([]byte, error) {
 	w, r := bufio.NewWriter(conn), bufio.NewReader(conn)
+	if err := sr.authenticate(w, r); err != nil {
+		return nil, err
+	}
+	if err := sr.selectDatabase(w, r); err != nil {
+		return nil, err
+	}
+	return exchange(w, r, expected, args...)
+}
+
+func (sr *SimpleRedis) authenticate(w *bufio.Writer, r *bufio.Reader) error {
 	if sr.username != "" || sr.pass != "" {
 		auth := []string{"AUTH", sr.pass}
 		if sr.username != "" {
 			auth = []string{"AUTH", sr.username, sr.pass}
 		}
 		if _, err := exchange(w, r, '+', auth...); err != nil {
-			return nil, err
+			return err
 		}
 	}
+	return nil
+}
+
+func (sr *SimpleRedis) selectDatabase(w *bufio.Writer, r *bufio.Reader) error {
 	if sr.database != "" {
 		if _, err := exchange(w, r, '+', "SELECT", sr.database); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return exchange(w, r, expected, args...)
+	return nil
 }
 
 func (sr *SimpleRedis) Get(name string) ([]byte, error) { return sr.execute('$', "GET", name) }
