@@ -85,12 +85,19 @@ func readReply(r *bufio.Reader) (byte, []byte, error) {
 		}
 		return kind, []byte(value), nil
 	case '$':
-		size, err := strconv.Atoi(value)
-		if err != nil || size < -1 || size > maxReplySize {
-			return 0, nil, errors.New("redis:invalid bulk length")
-		}
-		if size == -1 {
+		if value == "-1" {
 			return 0, nil, errors.New(RedisMiss)
+		}
+		// Bulk lengths are unsigned decimal digits; only the exact -1 sentinel
+		// denotes null. Atoi alone also accepts signed values such as -01.
+		for i := 0; i < len(value); i++ {
+			if value[i] < '0' || value[i] > '9' {
+				return 0, nil, errors.New("redis:invalid bulk length")
+			}
+		}
+		size, err := strconv.Atoi(value)
+		if err != nil || size > maxReplySize {
+			return 0, nil, errors.New("redis:invalid bulk length")
 		}
 		data := make([]byte, size+2)
 		if _, err := io.ReadFull(r, data); err != nil {
@@ -116,9 +123,14 @@ func exchange(w *bufio.Writer, r *bufio.Reader, expected byte, args ...string) (
 		}
 		return nil, err
 	}
-	if kind != expected || (expected == '+' && string(data) != "OK") ||
-		(expected == ':' && string(data) != "0" && string(data) != "1") {
+	if kind != expected || (expected == '+' && string(data) != "OK") {
 		return nil, errors.New("redis:unexpected reply")
+	}
+	if expected == ':' {
+		count, err := strconv.ParseInt(string(data), 10, 64)
+		if err != nil || (count != 0 && count != 1) {
+			return nil, errors.New("redis:unexpected reply")
+		}
 	}
 	return data, nil
 }
