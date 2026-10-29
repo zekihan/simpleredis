@@ -113,6 +113,11 @@ func readReply(r *bufio.Reader) (byte, []byte, error) {
 }
 
 func exchange(w *bufio.Writer, r *bufio.Reader, expected byte, args ...string) ([]byte, error) {
+	// Commands are never pipelined, so any reply already buffered belongs
+	// to the previous exchange. Do not let it satisfy a new command.
+	if r.Buffered() != 0 {
+		return nil, errors.New("redis:unexpected reply")
+	}
 	if err := writeCommand(w, args...); err != nil {
 		return nil, err
 	}
