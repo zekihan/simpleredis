@@ -209,7 +209,7 @@ func TestPoolRetirementClosesBorrowedAndWakesWaiters(t *testing.T) {
 	}
 }
 func TestPoolMalformedAndStaleSocketDiscard(t *testing.T) {
-	for _, reply := range []string{"?invalid\r\n", "$8\r\nx", "$2\r\nxx!!", "-WRONGPASS secret\r\n", "-NOPERM key\r\n"} {
+	for _, reply := range []string{"?invalid\r\n", "$8\r\nx", "$2\r\nxx!!", "$-01\r\n", "$-0\r\n\r\n", "$+1\r\nx\r\n", "-WRONGPASS secret\r\n", "-NOPERM key\r\n"} {
 		t.Run(reply, func(t *testing.T) {
 			var broken atomic.Bool
 			broken.Store(true)
@@ -222,7 +222,7 @@ func TestPoolMalformedAndStaleSocketDiscard(t *testing.T) {
 				return false
 			})
 			c := pooledClient(t, f, testPoolOptions())
-			if _, err := c.Get("key"); err == nil {
+			if _, err := c.Get("key"); err == nil || err.Error() == RedisMiss {
 				t.Fatal("invalid reply succeeded")
 			}
 			if _, err := c.Get("key"); err != nil {

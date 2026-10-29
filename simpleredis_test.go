@@ -229,3 +229,37 @@ func TestEvalEncodingAndReply(t *testing.T) {
 		t.Fatal(args)
 	}
 }
+
+func TestBulkLengthGrammar(t *testing.T) {
+	for _, reply := range []string{"$+1\r\nx\r\n", "$+0\r\n\r\n", "$-0\r\n\r\n", "$-01\r\n"} {
+		t.Run(strconv.Quote(reply), func(t *testing.T) {
+			_, _, err := readReply(bufio.NewReader(strings.NewReader(reply)))
+			if err == nil || err.Error() == RedisMiss {
+				t.Fatalf("malformed bulk length accepted as a value or miss: %v", err)
+			}
+		})
+	}
+	for _, reply := range []string{"$0\r\n\r\n", "$01\r\nx\r\n"} {
+		if kind, _, err := readReply(bufio.NewReader(strings.NewReader(reply))); kind != '$' || err != nil {
+			t.Fatalf("valid unsigned length rejected: %q: %v", reply, err)
+		}
+	}
+}
+
+func TestDeleteIntegerEncodings(t *testing.T) {
+	for _, value := range []string{"+0", "-0", "00", "+1", "01", "+2", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			addr := server(t, func(c net.Conn) {
+				_, _ = readCommand(bufio.NewReader(c))
+				_, _ = io.WriteString(c, ":"+value+"\r\n")
+			})
+			var client SimpleRedis
+			client.Init(addr, "", "")
+			err := client.Del("key")
+			wantSuccess := value != "+2" && value != "-1"
+			if (err == nil) != wantSuccess {
+				t.Fatalf("DEL count %s: error = %v, want success = %v", value, err, wantSuccess)
+			}
+		})
+	}
+}
